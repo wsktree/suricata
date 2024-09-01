@@ -124,9 +124,11 @@ static void DetectRun(ThreadVars *th_v,
     DetectRunScratchpad scratch = DetectRunSetup(de_ctx, det_ctx, p, pflow);
 
     /* run the IPonly engine */
+    //把命中的规则sid加入到alert array中作为输出
     DetectRunInspectIPOnly(th_v, de_ctx, det_ctx, pflow, p);
 
     /* get our rule group */
+    //获取该报文属于哪个规则分组，在规则加载中我们分别将规则的上下行端口进行分组
     DetectRunGetRuleGroup(de_ctx, p, pflow, &scratch);
     /* if we didn't get a sig group head, we
      * have nothing to do.... */
@@ -136,10 +138,19 @@ static void DetectRun(ThreadVars *th_v,
     }
 
     /* run the prefilters for packets */
+    //进行prefilter规则过滤，我们在第2步的时候获取分组sgh，
+    //这个分组包含了很多prefilter引擎列表，例如content prefilter,
+    //它是同属该组的规则的content会以hyperscan的多模数据库的形式组织，
+    //这样运行content prefilter时可快速得到匹配到候选者。
     DetectRunPrefilterPkt(th_v, de_ctx, det_ctx, p, &scratch);
 
     PACKET_PROFILING_DETECT_START(p, PROF_DETECT_RULES);
     /* inspect the rules against the packet */
+
+    //经过第3步一系列的prefilter过滤，会得到很少量的候选者sid，
+    //这个时候我们需要逐一遍历这些规则看看是否可以真正命中。
+    //首先会匹配五元组及协议，然后会对规则option一一匹配，例如pcre，threshold等等，
+    //如果这些option全部命中，我们才认为这个报文命中了该条规则，并会产生相关告警和日志。
     DetectRulePacketRules(th_v, de_ctx, det_ctx, p, pflow, &scratch);
     PACKET_PROFILING_DETECT_END(p, PROF_DETECT_RULES);
 

@@ -85,6 +85,7 @@ void DetectDetectionFilterRegister(void)
 static int DetectDetectionFilterMatch(
         DetectEngineThreadCtx *det_ctx, Packet *p, const Signature *s, const SigMatchCtx *ctx)
 {
+    SCLogInfo("DetectDetectionFilterMatch match return and do nothing ,it's match in other function!!");
     return 1;
 }
 
@@ -244,7 +245,7 @@ static int DetectDetectionFilterSetup(DetectEngineCtx *de_ctx, Signature *s, con
                 DETECT_SM_LIST_THRESHOLD) == NULL) {
         goto error;
     }
-
+    SCLogInfo("DetectDetectionFilterSetup add to sm listrawstr(%s)",rawstr);
     return 0;
 
 error:

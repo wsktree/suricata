@@ -103,6 +103,7 @@ void DetectThresholdRegister(void)
 static int DetectThresholdMatch(
         DetectEngineThreadCtx *det_ctx, Packet *p, const Signature *s, const SigMatchCtx *ctx)
 {
+    SCLogInfo("DetectThresholdMatch match return and do nothing ,it's match in other function!!");    	
     return 1;
 }
 
@@ -311,7 +312,8 @@ static int DetectThresholdSetup(DetectEngineCtx *de_ctx, Signature *s, const cha
                 de_ctx, s, DETECT_THRESHOLD, (SigMatchCtx *)de, DETECT_SM_LIST_THRESHOLD) == NULL) {
         goto error;
     }
-
+    SCLogInfo("DetectThresholdSetup add to sm listrawstr(%s)",rawstr);
+     
     return 0;
 
 error:

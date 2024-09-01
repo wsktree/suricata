@@ -1753,18 +1753,18 @@ int SigPrepareStage1(DetectEngineCtx *de_ctx)
         SCLogDebug("Signature %" PRIu32 ", internal id %" PRIu32 ", ptrs %p %p ", s->id, s->num, s, de_ctx->sig_array[s->num]);
 
         if (s->type == SIG_TYPE_PDONLY) {
-            SCLogDebug("Signature %"PRIu32" is considered \"PD only\"", s->id);
+            SCLogInfo("Signature %"PRIu32" is considered \"PD only\"", s->id);
         } else if (s->type == SIG_TYPE_IPONLY) {
-            SCLogDebug("Signature %"PRIu32" is considered \"IP only\"", s->id);
+            SCLogInfo("Signature %"PRIu32" is considered \"IP only\"", s->id);
             cnt_iponly++;
         } else if (SignatureIsInspectingPayload(de_ctx, s) == 1) {
-            SCLogDebug("Signature %"PRIu32" is considered \"Payload inspecting\"", s->id);
+            SCLogInfo("Signature %"PRIu32" is considered \"Payload inspecting\"", s->id);
             cnt_payload++;
         } else if (s->type == SIG_TYPE_DEONLY) {
-            SCLogDebug("Signature %"PRIu32" is considered \"Decoder Event only\"", s->id);
+            SCLogInfo("Signature %"PRIu32" is considered \"Decoder Event only\"", s->id);
             cnt_deonly++;
         } else if (s->flags & SIG_FLAG_APPLAYER) {
-            SCLogDebug("Signature %"PRIu32" is considered \"Applayer inspecting\"", s->id);
+            SCLogInfo("Signature %"PRIu32" is considered \"Applayer inspecting\"", s->id);
             cnt_applayer++;
         }
 

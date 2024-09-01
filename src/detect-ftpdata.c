@@ -145,7 +145,7 @@ static DetectFtpdataData *DetectFtpdataParse(const char *ftpcommandstr)
         SCLogError("pcre2_substring_copy_bynumber failed");
         goto error;
     }
-    SCLogDebug("Arg1 \"%s\"", arg1);
+    SCLogInfo("Arg1 \"%s\"", arg1);
 
     ftpcommandd = SCMalloc(sizeof (DetectFtpdataData));
     if (unlikely(ftpcommandd == NULL))
@@ -196,6 +196,7 @@ static int DetectFtpdataSetup(DetectEngineCtx *de_ctx, Signature *s, const char 
         DetectFtpdataFree(de_ctx, ftpcommandd);
         return -1;
     }
+    SCLogInfo("DetectFtpdataSetup sid(%d) msg(%s) add rawstr(%s) to smlist",s->id, s->msg, str);
     return 0;
 }
 

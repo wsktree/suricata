@@ -728,8 +728,10 @@ bool DetectEngineContentInspection(DetectEngineCtx *de_ctx, DetectEngineThreadCt
 #ifdef UNITTESTS
     ut_inspection_recursion_counter = ctx.recursion.count;
 #endif
-    if (r == 1)
+    if (r == 1) {
+	    SCLogInfo("=======DetectEngineContentInspection match the rule (%d)======",s->id);
         return true;
+    }
     else
         return false;
 }
@@ -752,8 +754,10 @@ bool DetectEngineContentInspectionBuffer(DetectEngineCtx *de_ctx, DetectEngineTh
 #ifdef UNITTESTS
     ut_inspection_recursion_counter = ctx.recursion.count;
 #endif
-    if (r == 1)
+    if (r == 1) {
+        SCLogInfo("=======DetectEngineContentInspectionBuffer match the rule (%d)======",s->id);
         return true;
+    }
     else
         return false;
 }

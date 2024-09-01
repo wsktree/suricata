@@ -56,6 +56,8 @@
 #include "util-thash.h"
 #include "util-hash-lookup3.h"
 
+#include "util-print.h"
+
 struct Thresholds {
     THashTableContext *thash;
 } ctx;
@@ -986,7 +988,38 @@ int PacketAlertThreshold(DetectEngineCtx *de_ctx, DetectEngineThreadCtx *det_ctx
             ret = ThresholdHandlePacketFlow(p->flow, p, td, s->id, s->gid, s->rev, pa);
         }
     }
-
+    /**
+     *  \retval 2 silent match (no alert but apply actions)
+     *  \retval 1 normal match
+     *  \retval 0 no match
+     */
+     {
+        int decoder_event = 0;
+        char srcip[46], dstip[46];
+        if (PacketIsIPv4(p)) {
+            PrintInet(AF_INET, (const void *)GET_IPV4_SRC_ADDR_PTR(p), srcip, sizeof(srcip));
+            PrintInet(AF_INET, (const void *)GET_IPV4_DST_ADDR_PTR(p), dstip, sizeof(dstip));
+        } else if (PacketIsIPv6(p)) {
+            PrintInet(AF_INET6, (const void *)GET_IPV6_SRC_ADDR(p), srcip, sizeof(srcip));
+            PrintInet(AF_INET6, (const void *)GET_IPV6_DST_ADDR(p), dstip, sizeof(dstip));
+        } else {
+            decoder_event = 1;
+        }
+        char match_str[32]= {0};
+        if( ret == 0) 
+            snprintf(match_str,sizeof(match_str),"%s","no match");
+        else if ( ret == 1)
+            snprintf(match_str,sizeof(match_str),"%s","normal match");
+        else if (ret == 2)
+            snprintf(match_str,sizeof(match_str),"%s","silent match");
+        
+        if (likely(decoder_event == 0)) {
+            SCLogInfo("PacketAlertFinalize (%s) for sid(%d) msg(%s) src(%s:%d) dst(%s:%d))",
+                match_str, s->id, s->msg , srcip, p->sp, dstip,p->dp);
+        } else {
+            SCLogInfo("PacketAlertFinalize (%s) for sid(%d) msg(%s)",match_str,s->id, s->msg);
+        }
+    }
     SCReturnInt(ret);
 }
 

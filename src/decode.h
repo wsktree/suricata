@@ -593,6 +593,7 @@ typedef struct Packet_
     struct LiveDevice_ *livedev;
 
     PacketAlerts alerts;
+    uint64_t alerts_uuid;
 
     struct Host_ *host_src;
     struct Host_ *host_dst;

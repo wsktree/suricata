@@ -37,10 +37,14 @@
 
 #include "action-globals.h"
 
+#include "util-print.h"
+
 /** tag signature we use for tag alerts */
 static Signature g_tag_signature;
 /** tag packet alert structure for tag alerts */
 static PacketAlert g_tag_pa;
+
+static uint64_t g_alert_uuid;
 
 void PacketAlertTagInit(void)
 {
@@ -190,7 +194,7 @@ static void PacketApplySignatureActions(Packet *p, const Signature *s, const Pac
         PacketDrop(p, pa->action,
                 (pa->flags & PACKET_ALERT_RATE_FILTER_MODIFIED) ? PKT_DROP_REASON_RULES_THRESHOLD
                                                                 : PKT_DROP_REASON_RULES);
-        SCLogDebug("[packet %p][DROP sid %u]", p, s->id);
+        SCLogInfo("[packet %p][DROP sid %u]", p, s->id);
 
         if (p->alerts.drop.action == 0) {
             p->alerts.drop.num = s->num;
@@ -228,7 +232,7 @@ void AlertQueueInit(DetectEngineThreadCtx *det_ctx)
                 (uint64_t)(packet_alert_max * sizeof(PacketAlert)));
     }
     det_ctx->alert_queue_capacity = packet_alert_max;
-    SCLogDebug("alert queue initialized to %u elements (%" PRIu64 " bytes)", packet_alert_max,
+    SCLogInfo("alert queue initialized to %u elements (%" PRIu64 " bytes)", packet_alert_max,
             (uint64_t)(packet_alert_max * sizeof(PacketAlert)));
 }
 
@@ -255,7 +259,7 @@ static uint16_t AlertQueueExpand(DetectEngineThreadCtx *det_ctx)
     }
     det_ctx->alert_queue = tmp_queue;
     det_ctx->alert_queue_capacity = new_cap;
-    SCLogDebug("Alert queue size doubled: %u elements, bytes: %" PRIuMAX "",
+    SCLogInfo("Alert queue size doubled: %u elements, bytes: %" PRIuMAX "",
             det_ctx->alert_queue_capacity,
             (uintmax_t)(sizeof(PacketAlert) * det_ctx->alert_queue_capacity));
     return new_cap;
@@ -400,8 +404,8 @@ void PacketAlertFinalize(DetectEngineCtx *de_ctx, DetectEngineThreadCtx *det_ctx
             /* set actions on the flow */
             FlowApplySignatureActions(p, pa, s, pa->flags);
 
-            SCLogDebug("det_ctx->alert_queue[i].action %02x (DROP %s, PASS %s)", pa->action,
-                    BOOL2STR(pa->action & ACTION_DROP), BOOL2STR(pa->action & ACTION_PASS));
+            SCLogDebug("det_ctx->alert_queue[%d].action %02x (DROP %s, PASS %s) res(%d) sid(%d) msg(%s)",i, pa->action,
+                    BOOL2STR(pa->action & ACTION_DROP), BOOL2STR(pa->action & ACTION_PASS),res,s->id,s->msg);
 
             /* set actions on packet */
             PacketApplySignatureActions(p, s, pa);
@@ -440,10 +444,29 @@ void PacketAlertFinalize(DetectEngineCtx *de_ctx, DetectEngineThreadCtx *det_ctx
         TagHandlePacket(de_ctx, det_ctx, p);
 
     /* Set flag on flow to indicate that it has alerts */
+    int decoder_event = 0;
     if (p->flow != NULL && p->alerts.cnt > 0) {
         if (!FlowHasAlerts(p->flow)) {
             FlowSetHasAlertsFlag(p->flow);
+            p->alerts_uuid = g_alert_uuid++;  //后面再加锁
             p->flags |= PKT_FIRST_ALERTS;
+            //加个打印看看
+            {
+                char srcip[46], dstip[46];
+                if (PacketIsIPv4(p)) {
+                    PrintInet(AF_INET, (const void *)GET_IPV4_SRC_ADDR_PTR(p), srcip, sizeof(srcip));
+                    PrintInet(AF_INET, (const void *)GET_IPV4_DST_ADDR_PTR(p), dstip, sizeof(dstip));
+                } else if (PacketIsIPv6(p)) {
+                    PrintInet(AF_INET6, (const void *)GET_IPV6_SRC_ADDR(p), srcip, sizeof(srcip));
+                    PrintInet(AF_INET6, (const void *)GET_IPV6_DST_ADDR(p), dstip, sizeof(dstip));
+                } else {
+                    decoder_event = 1;
+                }
+                if (likely(decoder_event == 0)) {
+                    SCLogInfo("PacketAlertFinalize first alert_uuid(%lu) src(%s:%d) dst(%s:%d) sid(%d) msg(%s)",
+                        p->alerts_uuid, srcip, p->sp, dstip,p->dp, p->alerts.alerts->s->id, p->alerts.alerts->s->msg);
+                }
+            }
         }
     }
 }

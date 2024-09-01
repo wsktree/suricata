@@ -55,6 +55,8 @@
 #include "util-path.h"
 #include "util-time.h"
 
+#include "util-print.h"
+
 #define DEFAULT_LOG_FILENAME            "pcaplog"
 #define MODULE_NAME                     "PcapLog"
 #define MIN_LIMIT                       4 * 1024 * 1024
@@ -132,6 +134,18 @@ typedef struct PcapLogCompressionData_ {
     uint64_t bytes_in_block;
 } PcapLogCompressionData;
 
+//每个alerts需要单独保存
+typedef struct PcapLogData_alerts_ {
+    uint64_t uuid;
+    struct pcap_pkthdr *h;
+    char *filename;
+    pcap_t *pcap_dead_handle;
+    pcap_dumper_t *pcap_dumper;
+    struct timeval last_pcap_dump;
+
+    TAILQ_ENTRY(PcapLogData_alerts_) next;
+}PcapLogData_alerts;
+
 /**
  * PcapLog thread vars
  *
@@ -166,7 +180,8 @@ typedef struct PcapLogData_ {
     PcapLogProfileData profile_rotate;
 
     TAILQ_HEAD(, PcapFileName_) pcap_file_list;
-
+    TAILQ_HEAD(, PcapLogData_alerts_) pl_alerts_list;
+   
     uint32_t thread_number;     /**< thread number, first thread is 1, second 2, etc */
     int use_ringbuffer;         /**< ring buffer mode enabled or disabled */
     int timestamp_format;       /**< timestamp format sec or usec */
@@ -182,6 +197,9 @@ typedef struct PcapLogData_ {
     bool pcap_open_err; /**< true if the last pcap open errored */
 
     PcapLogCompressionData compression;
+
+    //PcapLogData_alerts pl_alerts;
+    uint64_t pkt_cnt_alerts;
 } PcapLogData;
 
 typedef struct PcapLogThreadData_ {
@@ -206,6 +224,7 @@ static void PcapLogFileDeInitCtx(OutputCtx *);
 static OutputInitResult PcapLogInitCtx(ConfNode *);
 static void PcapLogProfilingDump(PcapLogData *);
 static bool PcapLogCondition(ThreadVars *, void *, const Packet *);
+void PcapLogDataAlertsFree(PcapLogData_alerts *pl_alerts);
 
 void PcapLogRegister(void)
 {
@@ -379,17 +398,17 @@ static int PcapLogOpenHandles(PcapLogData *pl, const Packet *p)
         datalink = real_p->datalink;
     }
     if (pl->pcap_dead_handle == NULL) {
-        SCLogDebug("Setting pcap-log link type to %u", datalink);
+        SCLogInfo("Setting pcap-log link type to %u", datalink);
         if ((pl->pcap_dead_handle = pcap_open_dead(datalink, PCAP_SNAPLEN)) == NULL) {
-            SCLogDebug("Error opening dead pcap handle");
+            SCLogInfo("Error opening dead pcap handle");
             return TM_ECODE_FAILED;
         }
+        SCLogInfo("PcapLogOpenHandles pcap_dead_handle(%p)",pl->pcap_dead_handle);
     }
 
     if (pl->pcap_dumper == NULL) {
         if (pl->compression.format == PCAP_LOG_COMPRESSION_FORMAT_NONE) {
-            if ((pl->pcap_dumper = pcap_dump_open(pl->pcap_dead_handle,
-                    pl->filename)) == NULL) {
+            if ((pl->pcap_dumper = pcap_dump_open(pl->pcap_dead_handle,pl->filename)) == NULL) {
                 if (!pl->pcap_open_err) {
                     SCLogError("Error opening dump file %s", pcap_geterr(pl->pcap_dead_handle));
                     pl->pcap_open_err = true;
@@ -397,6 +416,7 @@ static int PcapLogOpenHandles(PcapLogData *pl, const Packet *p)
                 return TM_ECODE_FAILED;
             } else {
                 pl->pcap_open_err = false;
+                SCLogInfo("PcapLogOpenHandles pcap_dumper_t(%p)",pl->pcap_dumper);
             }
         }
 #ifdef HAVE_LIBLZ4
@@ -414,8 +434,7 @@ static int PcapLogOpenHandles(PcapLogData *pl, const Packet *p)
                 pl->fopen_err = 0;
             }
 
-            if ((pl->pcap_dumper = pcap_dump_fopen(pl->pcap_dead_handle, comp->pcap_buf_wrapper)) ==
-                    NULL) {
+            if ((pl->pcap_dumper = pcap_dump_fopen(pl->pcap_dead_handle, comp->pcap_buf_wrapper)) == NULL) {
                 if (!pl->pcap_open_err) {
                     SCLogError("Error opening dump file %s", pcap_geterr(pl->pcap_dead_handle));
                     pl->pcap_open_err = true;
@@ -471,11 +490,18 @@ static void PcapLogUnlock(PcapLogData *pl)
     }
 }
 
+/* pcap_dump 需要传入参数
+ 参数1. pcap_dumper_t *pcap_dumper, 这个参数在openHandles函数里面通过pcap_dump_open(pl->pcap_dead_handle,pl->filename)生成的
+    其中pcap_dead_handle是通过pcap_open_dead生成的，不需要参数,类似socket一样，就是一个fd的东西
+ 参数2. pcap_pkthdr,这个结构有3个成员struct tim           ts，caplen,len 时间和长度
+ 参数3. 写入的数据uint8_t* 字节
+ */
 static inline int PcapWrite(
         PcapLogData *pl, PcapLogCompressionData *comp, const uint8_t *data, const size_t len)
 {
     struct timeval current_dump;
     gettimeofday(&current_dump, NULL);
+
     pcap_dump((u_char *)pl->pcap_dumper, pl->h, data);
     if (pl->compression.format == PCAP_LOG_COMPRESSION_FORMAT_NONE) {
         pl->size_current += len;
@@ -517,9 +543,26 @@ static inline int PcapWrite(
     return TM_ECODE_OK;
 }
 
+static inline int PcapWriteAlerts(
+        PcapLogData_alerts *pl_alerts, const uint8_t *data, const size_t len)
+{
+    struct timeval current_dump;
+    gettimeofday(&current_dump, NULL);
+
+    SCLogInfo("PcapWriteAlerts for pl_alerts(%p) uuid(%lu) len(%u)",pl_alerts,pl_alerts->uuid,len);
+    pcap_dump((u_char *)pl_alerts->pcap_dumper, pl_alerts->h, data);
+    
+    if (TimeDifferenceMicros(pl_alerts->last_pcap_dump, current_dump) >= PCAP_BUFFER_TIMEOUT) {
+        pcap_dump_flush(pl_alerts->pcap_dumper);
+    }
+    pl_alerts->last_pcap_dump = current_dump;
+    return TM_ECODE_OK;
+}
+
 struct PcapLogCallbackContext {
     PcapLogData *pl;
     PcapLogCompressionData *comp;
+    void* pl_alerts;  //PcapLogData_alerts*
     MemBuffer *buf;
 };
 
@@ -537,22 +580,172 @@ static int PcapLogSegmentCallback(
         MemBufferWriteRaw(pctx->buf, seg->pcap_hdr_storage->pkt_hdr, seg->pcap_hdr_storage->pktlen);
         MemBufferWriteRaw(pctx->buf, buf, buflen);
 
+        {
+            int decoder_event = 0;
+            char srcip[46], dstip[46];
+            if (PacketIsIPv4(p)) {
+                PrintInet(AF_INET, (const void *)GET_IPV4_SRC_ADDR_PTR(p), srcip, sizeof(srcip));
+                PrintInet(AF_INET, (const void *)GET_IPV4_DST_ADDR_PTR(p), dstip, sizeof(dstip));
+            } else if (PacketIsIPv6(p)) {
+                PrintInet(AF_INET6, (const void *)GET_IPV6_SRC_ADDR(p), srcip, sizeof(srcip));
+                PrintInet(AF_INET6, (const void *)GET_IPV6_DST_ADDR(p), dstip, sizeof(dstip));
+            } else {
+                decoder_event = 1;
+            }
+            if (likely(decoder_event == 0)) {
+                if(p->alerts.alerts->num) {
+                    SCLogInfo("PcapLog PcapLogSegmentCallback PcapWrite pl_alert(%p) src(%s:%d) dst(%s:%d) sid(%d) msg(%s))",
+                        pctx->pl_alerts,srcip, p->sp, dstip, p->dp ,p->alerts.alerts->s->id, p->alerts.alerts->s->msg);
+                }else {
+                    SCLogInfo("PcapLog PcapLogSegmentCallback PcapWrite pl_alert(%p) src(%s:%d) dst(%s:%d)",
+                        pctx->pl_alerts,srcip, p->sp, dstip ,p->dp);
+                }
+            }
+        }
         PcapWrite(pctx->pl, pctx->comp, (uint8_t *)pctx->buf->buffer, pctx->pl->h->len);
+        PcapWriteAlerts((PcapLogData_alerts*)pctx->pl_alerts, (uint8_t *)pctx->buf->buffer, pctx->pl->h->len);
     }
     return 1;
 }
 
 static void PcapLogDumpSegments(
-        PcapLogThreadData *td, PcapLogCompressionData *comp, const Packet *p)
+        PcapLogThreadData *td, PcapLogCompressionData *comp, const Packet *p, void* pl_alert)
 {
     uint8_t flag = STREAM_DUMP_HEADERS;
 
     /* Loop on segment from this side */
-    struct PcapLogCallbackContext data = { td->pcap_log, comp, td->buf };
+    struct PcapLogCallbackContext data = { td->pcap_log, comp, pl_alert, td->buf };
     StreamSegmentForSession(p, flag, PcapLogSegmentCallback, (void *)&data);
 }
 
+char* GenerateUniqueFileName(Packet *p) 
+{
+    //struct timeval tv;
+    //gettimeofday(&tv, NULL);
+    static char filename[256];
+    time_t now = time(NULL);
+    struct tm *local = localtime(&now);
+    
+    snprintf(filename, sizeof(filename),
+             "/var/log/suricata/alert-%d_%d-%d-%d%d%d%d%d%d.pcap",
+             p->alerts.alerts->s->id,p->sp,p->dp,
+             local->tm_year + 1900, local->tm_mon + 1, local->tm_mday,
+             local->tm_hour, local->tm_min, local->tm_sec);
+
+    return filename;
+}
+
+/* 新增函数第一个匹配Alerts报文后 初始化
+   因为需要每个alert保存报文 
+*/
+static int PcapLogInitAlerts(ThreadVars *t, void *thread_data, const Packet *p, void** pl_alert_para)
+{
+    char *filename = GenerateUniqueFileName(p);
+    SCLogInfo("filename(%s)",filename);
+    Packet *rp = NULL;
+    int ret = 0;
+
+    PcapLogThreadData *td = (PcapLogThreadData *)thread_data;
+    PcapLogData *pl = td->pcap_log;
+
+    //新建一个PcapLogData_alerts_ 加到队列
+    PcapLogData_alerts *pf_alerts = SCCalloc(sizeof(*pf_alerts), 1);
+    if(pf_alerts == NULL) {
+        FatalError("Failed to allocate Memory for PcapLogData_alerts_");
+        return -1;
+    }
+    *pl_alert_para = pf_alerts;
+    pf_alerts->uuid = p->alerts_uuid;
+    pf_alerts->filename = SCStrdup(filename);
+    if(pf_alerts->filename == NULL) {
+        FatalError("Failed to allocate Memory for alerts filename");
+        goto error;
+    }
+
+    pf_alerts->h = SCMalloc(sizeof(*pf_alerts->h));
+    if (pf_alerts->h == NULL) {
+        FatalError("Failed to allocate Memory for PcapLogData_alerts_h");
+        goto error;
+    }
+
+    int datalink = p->datalink;
+    if (p->ttype == PacketTunnelChild) {
+        Packet *real_p = p->root;
+        datalink = real_p->datalink;
+    }
+    
+    if (pf_alerts->pcap_dead_handle == NULL) {
+        if ((pf_alerts->pcap_dead_handle = pcap_open_dead(datalink, PCAP_SNAPLEN)) == NULL) {
+            SCLogInfo("Error PcapLogInitAlerts pcap_open_dead");
+            goto error;
+        }
+    }
+
+    if (pf_alerts->pcap_dumper == NULL) {
+        if ((pf_alerts->pcap_dumper = pcap_dump_open(pf_alerts->pcap_dead_handle,filename)) == NULL) {
+            SCLogInfo("Error PcapLogInitAlerts pcap_dump_open");
+            goto error;;
+        }
+    }
+    TAILQ_INSERT_TAIL(&pl->pl_alerts_list, pf_alerts, next);
+    SCLogInfo("PcapLogInitAlerts add uuid(%lu) to queue",pf_alerts->uuid);
+    return 0;
+    
+error:
+   PcapLogDataAlertsFree(pf_alerts);
+        
+   return -1;
+}
+
+static int PcapLogDoWork(PcapLogData *pl, const Packet *p)
+{
+    Packet *rp = NULL;
+    size_t len = 0;
+
+    //通过uuid查找到PcapLogData_alerts
+    PcapLogData_alerts *it = NULL;
+    TAILQ_FOREACH(it, &pl->pl_alerts_list, next) {
+        if (it->uuid == p->alerts_uuid) {
+            SCLogInfo("PcapLogDoWork get uuid(%lu) to write alert packet",it->uuid);
+            break;
+        }
+    }
+    if(it == NULL) {
+        SCLogError("can not find the alert uuid, this is error!!!");
+        return -1;
+    }
+    it->h->ts.tv_sec = SCTIME_SECS(p->ts);
+    it->h->ts.tv_usec = SCTIME_USECS(p->ts);
+
+    if (p->ttype == PacketTunnelChild) {
+        rp = p->root;
+        it->h->caplen = GET_PKT_LEN(rp);
+        it->h->len = GET_PKT_LEN(rp);
+        len = PCAP_PKTHDR_SIZE + GET_PKT_LEN(rp);
+    } else {
+        it->h->caplen = GET_PKT_LEN(p);
+        it->h->len = GET_PKT_LEN(p);
+        len = PCAP_PKTHDR_SIZE + GET_PKT_LEN(p);
+    }
+    //要判断一下返回值?
+    PcapWriteAlerts(it, GET_PKT_DATA(p), len);
+}
+
+
 /**
+ 调用链
+#0  PcapLog (t=0x555556edb8f0, thread_data=0x7fffe43944e0, p=0x7fffe42701b0) at log-pcap.c:569
+#1  OutputPacketLog (tv=0x555556edb8f0, p=0x7fffe42701b0, thread_data=<optimized out>) at output-packet.c:109
+#2  OutputLoggerLog (tv=tv@entry=0x555556edb8f0, p=p@entry=0x7fffe42701b0, thread_data=<optimized out>) at output.c:762
+#3  FlowWorker (tv=0x555556edb8f0, p=0x7fffe42701b0, data=0x7fffe42750e0) at flow-worker.c:641
+#4  TmThreadsSlotVarRun (tv=tv@entry=0x555556edb8f0, p=p@entry=0x7fffe42701b0, slot=<optimized out>) at tm-threads.c:135
+#5  TmThreadsSlotProcessPkt (tv=0x555556edb8f0, s=<optimized out>, p=0x7fffe42701b0) at /home/wanwoo/suricata/src/tm-threads.h:200
+#6  AFPReadFromRing (ptv=ptv@entry=0x7fffe4270b70) at source-af-packet.c:939
+#7  ReceiveAFPLoop (tv=<optimized out>, data=<optimized out>, slot=<optimized out>) at source-af-packet.c:1430
+#8  TmThreadsSlotPktAcqLoop (td=0x555556edb8f0) at tm-threads.c:316
+#9  in start_thread (arg=<optimized out>) at ./nptl/pthread_create.c:442
+
+
  * \brief Pcap logging main function
  *
  * \param t threadvar
@@ -562,7 +755,7 @@ static void PcapLogDumpSegments(
  * \retval TM_ECODE_OK on succes
  * \retval TM_ECODE_FAILED on serious error
  */
-static int PcapLog (ThreadVars *t, void *thread_data, const Packet *p)
+static int PcapLog(ThreadVars *t, void *thread_data, const Packet *p)
 {
     size_t len;
     int ret = 0;
@@ -570,9 +763,10 @@ static int PcapLog (ThreadVars *t, void *thread_data, const Packet *p)
 
     PcapLogThreadData *td = (PcapLogThreadData *)thread_data;
     PcapLogData *pl = td->pcap_log;
-
+ 
     if (((p->flags & PKT_STREAM_NOPCAPLOG) && (pl->use_stream_depth == USE_STREAM_DEPTH_ENABLED)) ||
             (pl->honor_pass_rules && (p->flags & PKT_NOPACKET_INSPECTION))) {
+        SCLogInfo("PcapLog p->flags(%u) skip",p->flags);    
         return TM_ECODE_OK;
     }
 
@@ -581,6 +775,7 @@ static int PcapLog (ThreadVars *t, void *thread_data, const Packet *p)
     pl->pkt_cnt++;
     pl->h->ts.tv_sec = SCTIME_SECS(p->ts);
     pl->h->ts.tv_usec = SCTIME_USECS(p->ts);
+
     if (p->ttype == PacketTunnelChild) {
         rp = p->root;
         pl->h->caplen = GET_PKT_LEN(rp);
@@ -591,19 +786,25 @@ static int PcapLog (ThreadVars *t, void *thread_data, const Packet *p)
         pl->h->len = GET_PKT_LEN(p);
         len = PCAP_PKTHDR_SIZE + GET_PKT_LEN(p);
     }
+    SCLogInfo("Theadnum(%d) PcapLog need write packet len(%u)",pl->thread_number, len); 
+
 
     if (pl->filename == NULL) {
+        SCLogInfo("filename NUll,now set it");
         ret = PcapLogOpenFileCtx(pl);
         if (ret < 0) {
             PcapLogUnlock(pl);
             return TM_ECODE_FAILED;
         }
-        SCLogDebug("Opening PCAP log file %s", pl->filename);
+        SCLogInfo("set filename %s", pl->filename);
+    } else {
+        SCLogInfo("filename(%s),no need to set",pl->filename);
     }
 
     PcapLogCompressionData *comp = &pl->compression;
     if (comp->format == PCAP_LOG_COMPRESSION_FORMAT_NONE) {
         if ((pl->size_current + len) > pl->size_limit) {
+            SCLogInfo("file size(%d) > limit(%d),PcapLogRotateFile", pl->size_current + len,pl->size_limit);
             if (PcapLogRotateFile(t,pl) < 0) {
                 PcapLogUnlock(pl);
                 SCLogDebug("rotation of pcap failed");
@@ -632,23 +833,33 @@ static int PcapLog (ThreadVars *t, void *thread_data, const Packet *p)
     /* XXX pcap handles, nfq, pfring, can only have one link type ipfw? we do
      * this here as we don't know the link type until we get our first packet */
     if (pl->pcap_dead_handle == NULL || pl->pcap_dumper == NULL) {
+        SCLogInfo("pcap_dead_handle or pcap_dumper not init,now init");
         if (PcapLogOpenHandles(pl, p) != TM_ECODE_OK) {
             PcapLogUnlock(pl);
             return TM_ECODE_FAILED;
-        }
+        } 
     }
 
     PCAPLOG_PROFILE_START;
 
     /* if we are using alerted logging and if packet is first one with alert in flow
-     * then we need to dump in the pcap the stream acked by the packet */
+     * then we need to dump in the pcap the stream acked by the packet 
+     */
     if ((p->flags & PKT_FIRST_ALERTS) && (td->pcap_log->conditional != LOGMODE_COND_ALL)) {
+       
+        /* Alert的第一个报文开始初始化-为了每个alerts单独存*/
+        void* pf_alert_para = NULL;
+        PcapLogInitAlerts(t, thread_data, p, &pf_alert_para);
+        SCLogInfo("PcapLog is firstalert pf_alert_para(%p)",pf_alert_para);
+
         if (PacketIsTCP(p)) {
-            /* dump fake packets for all segments we have on acked by packet */
-            PcapLogDumpSegments(td, comp, p);
+            /* dump fake packets for all segments we have on acked by packet /*保存完整上下文*/
+            SCLogInfo("PcapLog PcapLogDumpSegments");
+            PcapLogDumpSegments(td, comp, p, pf_alert_para);
 
             if (p->flags & PKT_PSEUDO_STREAM_END) {
                 PcapLogUnlock(pl);
+                SCLogInfo("PcapLog flag PKT_PSEUDO_STREAM_END return");
                 return TM_ECODE_OK;
             }
 
@@ -667,11 +878,36 @@ static int PcapLog (ThreadVars *t, void *thread_data, const Packet *p)
             }
         }
     }
+    PcapLogDoWork(pl, p);
 
+    {
+        int decoder_event = 0;
+        char srcip[46], dstip[46];
+        if (PacketIsIPv4(p)) {
+            PrintInet(AF_INET, (const void *)GET_IPV4_SRC_ADDR_PTR(p), srcip, sizeof(srcip));
+            PrintInet(AF_INET, (const void *)GET_IPV4_DST_ADDR_PTR(p), dstip, sizeof(dstip));
+        } else if (PacketIsIPv6(p)) {
+            PrintInet(AF_INET6, (const void *)GET_IPV6_SRC_ADDR(p), srcip, sizeof(srcip));
+            PrintInet(AF_INET6, (const void *)GET_IPV6_DST_ADDR(p), dstip, sizeof(dstip));
+        } else {
+            decoder_event = 1;
+        }
+        if (likely(decoder_event == 0)) {
+            if(p->alerts.alerts->num) {
+                SCLogInfo("PcapLog PcapWrite pl->pkt_cnt(%lu) src(%s:%d) dst(%s:%d) sid(%d) msg(%s))",
+                    pl->pkt_cnt, srcip, p->sp, dstip, p->dp ,p->alerts.alerts->s->id, p->alerts.alerts->s->msg);
+            }else {
+                SCLogInfo("PcapLog PcapWrite pl->pkt_cnt(%lu) src(%s:%d) dst(%s:%d)",
+                    pl->pkt_cnt, srcip, p->sp, dstip ,p->dp);
+            }
+        }
+    }
+    
     if (p->ttype == PacketTunnelChild) {
         rp = p->root;
         ret = PcapWrite(pl, comp, GET_PKT_DATA(rp), len);
     } else {
+        SCLogInfo("PcapLog PcapWrite len(%u)",len); 
         ret = PcapWrite(pl, comp, GET_PKT_DATA(p), len);
     }
     if (ret != TM_ECODE_OK) {
@@ -840,6 +1076,9 @@ static int PcapLogGetTimeOfFile(const char *filename, uint64_t *secs,
     return 1;
 }
 
+/* 这个函数做的事情:
+1. 把文件名列表按时间顺序放到队列里面
+2. 如果超过了最大的文件个数则删除最前面的, 因为是按时间排序了,删最早的*/
 static TmEcode PcapLogInitRingBuffer(PcapLogData *pl)
 {
     char pattern[PATH_MAX];
@@ -983,12 +1222,23 @@ static TmEcode PcapLogInitRingBuffer(PcapLogData *pl)
     closedir(dir);
 
     /* For some reason file count is initialized at one, instead of 0. */
-    SCLogNotice("Ring buffer initialized with %d files.", pl->file_cnt - 1);
+    SCLogInfo("Ring buffer initialized with %d files.", pl->file_cnt - 1);
 
     return TM_ECODE_OK;
 }
 #endif /* INIT_RING_BUFFER */
 
+/*调用链:
+#0  PcapLogDataInit (t=0x555556eda8f0, initdata=0x555556e35650, data=0x7ffff63ff1d0) at log-pcap.c:1026
+#1  OutputPacketLogThreadInit (tv=0x555556eda8f0, initdata=<optimized out>, data=<optimized out>) at output-packet.c:140
+#2  OutputLoggerThreadInit (tv=tv@entry=0x555556eda8f0, initdata=initdata@entry=0x0, data=data@entry=0x7ffff02781a8) at output.c:784
+#3  FlowWorkerThreadInit (tv=0x555556eda8f0, initdata=0x0, data=0x7ffff63ff2b8) at flow-worker.c:288
+#4  TmThreadsSlotPktAcqLoop (td=0x555556eda8f0) at tm-threads.c:262
+
+   这个是在PcapLogInitCtx之后调用的, 所以他能使用PcapLogInitCtx申请结构PcapLogData *pl
+   1. 申请线程数据PcapLogThreadData *td, td->pcap_log = pl
+
+*/
 static TmEcode PcapLogDataInit(ThreadVars *t, const void *initdata, void **data)
 {
     if (initdata == NULL) {
@@ -1032,6 +1282,10 @@ static TmEcode PcapLogDataInit(ThreadVars *t, const void *initdata, void **data)
     PcapLogLock(td->pcap_log);
 
     /** Use the Output Context (file pointer and mutex) */
+    /* 初始化每个线程的变量*/
+    SCLogInfo("before initialize thread pkt_cnt(%d) pcap_dead_handle pcap_dumper(%p/%p),file_cnt(%d)",
+               td->pcap_log->pkt_cnt,td->pcap_log->pcap_dead_handle,td->pcap_log->pcap_dumper,td->pcap_log->file_cnt);
+    
     td->pcap_log->pkt_cnt = 0;
     td->pcap_log->pcap_dead_handle = NULL;
     td->pcap_log->pcap_dumper = NULL;
@@ -1044,11 +1298,14 @@ static TmEcode PcapLogDataInit(ThreadVars *t, const void *initdata, void **data)
     struct tm *tms = SCLocalTime(SCTIME_SECS(ts), &local_tm);
     td->pcap_log->prev_day = tms->tm_mday;
 
+    SCLogInfo("initialize thread,clear the data");
+
     PcapLogUnlock(td->pcap_log);
 
     /* count threads in the global structure */
     SCMutexLock(&pl->plog_lock);
     pl->threads++;
+    SCLogInfo("initialize thread, thrads num(%d)",pl->threads);
     SCMutexUnlock(&pl->plog_lock);
 
     *data = (void *)td;
@@ -1110,9 +1367,43 @@ static void StatsMerge(PcapLogData *dst, PcapLogData *src)
     dst->profile_data_size += src->profile_data_size;
 }
 
+void PcapLogDataAlertsFree(PcapLogData_alerts *pl_alerts)
+{
+    if(pl_alerts->pcap_dumper != NULL) {
+        pcap_dump_close(pl_alerts->pcap_dumper);
+        pl_alerts->pcap_dumper = NULL;
+    }
+
+    if (pl_alerts->pcap_dead_handle != NULL) {
+        pcap_close(pl_alerts->pcap_dead_handle);
+        pl_alerts->pcap_dead_handle = NULL;
+    }
+    
+    if (pl_alerts->filename != NULL) {
+        SCFree(pl_alerts->filename);
+        pl_alerts->filename = NULL;
+    }
+    
+    if(pl_alerts->h != NULL)
+        SCFree(pl_alerts->h);
+
+    if(pl_alerts != NULL)
+        SCFree(pl_alerts);
+}
+
+void PcapLogAlertsFree(PcapLogData *pl)
+{
+    PcapLogData_alerts *pf_alerts;
+    while ((pf_alerts = TAILQ_FIRST(&pl->pl_alerts_list)) != NULL) {
+        TAILQ_REMOVE(&pl->pcap_file_list, pf_alerts, next);
+        PcapLogDataAlertsFree(pf_alerts);
+    }
+}
+
 static void PcapLogDataFree(PcapLogData *pl)
 {
-
+    PcapLogAlertsFree(pl);
+    
     PcapFileName *pf;
     while ((pf = TAILQ_FIRST(&pl->pcap_file_list)) != NULL) {
         TAILQ_REMOVE(&pl->pcap_file_list, pf, next);
@@ -1132,7 +1423,7 @@ static void PcapLogDataFree(PcapLogData *pl)
     if (pl->pcap_dead_handle) {
         pcap_close(pl->pcap_dead_handle);
     }
-
+    
 #ifdef HAVE_LIBLZ4
     if (pl->compression.format == PCAP_LOG_COMPRESSION_FORMAT_LZ4) {
         SCFree(pl->compression.buffer);
@@ -1288,7 +1579,16 @@ error:
     return -1;
 }
 
-/** \brief Fill in pcap logging struct from the provided ConfNode.
+/** output模块初始化的时候调用里面注册的各个InitFunc函数
+    用于申请模块共用的内存和读取yaml文件复制到结构体里面
+    
+    1.申请PcapLogData结构给模块共用PcapLogData *pl
+    2.申请pcap_pkthdr给模块共用 p1->h
+    3.初始化线程锁pl->plog_lock
+    4.初始化存线程文件名的队列pl->pcap_file_list
+    5.如果是mutil模式,还需要存一些东西,因为不用,先不看他
+    
+    \brief Fill in pcap logging struct from the provided ConfNode.
  *  \param conf The configuration node for this output.
  *  \retval output_ctx
  * */
@@ -1318,6 +1618,7 @@ static OutputInitResult PcapLogInitCtx(ConfNode *conf)
     pl->conditional = LOGMODE_COND_ALL;
 
     TAILQ_INIT(&pl->pcap_file_list);
+    TAILQ_INIT(&pl->pl_alerts_list);
 
     SCMutexInit(&pl->plog_lock, NULL);
 
@@ -1510,8 +1811,7 @@ static OutputInitResult PcapLogInitCtx(ConfNode *conf)
             return result;
         }
 
-        SCLogInfo("Selected pcap-log compression method: %s",
-                compression_str ? compression_str : "none");
+        SCLogInfo("Selected pcap-log compression method: %s",compression_str ? compression_str : "none");
 
         const char *s_conditional = ConfNodeLookupChildValue(conf, "conditional");
         if (s_conditional != NULL) {
@@ -1528,8 +1828,7 @@ static OutputInitResult PcapLogInitCtx(ConfNode *conf)
             }
         }
 
-        SCLogInfo(
-                "Selected pcap-log conditional logging: %s", s_conditional ? s_conditional : "all");
+        SCLogInfo("Selected pcap-log conditional logging: %s", s_conditional ? s_conditional : "all");
     }
 
     if (ParseFilename(pl, filename) != 0)
@@ -1554,6 +1853,7 @@ static OutputInitResult PcapLogInitCtx(ConfNode *conf)
             } else {
                 pl->max_files = max_file_limit;
                 pl->use_ringbuffer = RING_BUFFER_MODE_ENABLED;
+                SCLogInfo("log-pcap set max-files(%d)",pl->max_files);
             }
         }
     }
@@ -1607,6 +1907,8 @@ static OutputInitResult PcapLogInitCtx(ConfNode *conf)
     if (unlikely(output_ctx == NULL)) {
         FatalError("Failed to allocate memory for OutputCtx.");
     }
+    SCLogInfo("malloc output_ctx(%p)",output_ctx);
+    
     output_ctx->data = pl;
     output_ctx->DeInit = PcapLogFileDeInitCtx;
     g_pcap_data = pl;
@@ -1648,6 +1950,8 @@ static int PcapLogOpenFileCtx(PcapLogData *pl)
 
     PCAPLOG_PROFILE_START;
 
+    SCLogInfo("first PcapLogOpenFileCtx pl->filename %s", pl->filename);
+    
     if (pl->filename != NULL)
         filename = pl->filename;
     else {
@@ -1677,6 +1981,7 @@ static int PcapLogOpenFileCtx(PcapLogData *pl)
             ret = snprintf(filename, PATH_MAX, "%s/%s.%" PRIu32 ".%" PRIu32 "%s", pl->dir,
                     pl->prefix, (uint32_t)SCTIME_SECS(ts), (uint32_t)SCTIME_USECS(ts), pl->suffix);
         }
+        SCLogInfo("second PcapLogOpenFileCtx pl->filename %s", pl->filename);
         if (ret < 0 || (size_t)ret >= PATH_MAX) {
             SCLogError("failed to construct path");
             goto error;

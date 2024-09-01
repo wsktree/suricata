@@ -1348,6 +1348,9 @@ static int SigParseBasics(DetectEngineCtx *de_ctx, Signature *s, const char *sig
     /* Destination port(s). */
     SigParseList(&index, parser->dp, sizeof(parser->dp));
 
+    SCLogInfo("======action(%s) proto(%s) src(%s) sp(%s) direction(%s) dst(%s) dp(%s)",
+        parser->action,parser->protocol,parser->src,parser->sp,parser->direction,parser->dst,parser->dp);
+
     /* Options. */
     if (index == NULL) {
         SCLogError("no rule options.");

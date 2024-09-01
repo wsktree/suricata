@@ -618,7 +618,7 @@ static void SetupOutput(
     }
 
     if (module->PacketLogFunc) {
-        SCLogDebug("%s is a packet logger", module->name);
+        SCLogInfo("%s is a packet logger", module->name);
         OutputRegisterPacketLogger(module->logger_id, module->name,
             module->PacketLogFunc, module->PacketConditionFunc, output_ctx,
             module->ThreadInit, module->ThreadDeinit,
