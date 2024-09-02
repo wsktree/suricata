@@ -120,7 +120,6 @@ void PacketReinit(Packet *p)
     p->BypassPacketsFlow = NULL;
 #define RESET_PKT_LEN(p) ((p)->pktlen = 0)
     RESET_PKT_LEN(p);
-    p->alerts_uuid = 0;
     p->alerts.cnt = 0;
     p->alerts.discarded = 0;
     p->alerts.suppressed = 0;

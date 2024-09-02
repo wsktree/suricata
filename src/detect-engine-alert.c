@@ -44,7 +44,7 @@ static Signature g_tag_signature;
 /** tag packet alert structure for tag alerts */
 static PacketAlert g_tag_pa;
 
-static uint64_t g_alert_uuid;
+SC_ATOMIC_DECLARE(uint32_t, g_alert_uuid_id);
 
 void PacketAlertTagInit(void)
 {
@@ -60,6 +60,7 @@ void PacketAlertTagInit(void)
 
     g_tag_pa.action = ACTION_ALERT;
     g_tag_pa.s = &g_tag_signature;
+    SC_ATOMIC_INIT(g_alert_uuid_id);
 }
 
 /**
@@ -304,8 +305,22 @@ void AlertQueueAppend(DetectEngineThreadCtx *det_ctx, const Signature *s, Packet
         }
     }
     det_ctx->alert_queue[pos] = PacketAlertSet(det_ctx, s, tx_id, alert_flags);
-
-    SCLogDebug("Appending sid %" PRIu32 ", s->num %" PRIu32 " to alert queue", s->id, s->num);
+    {
+        int decoder_event = 0;
+        char srcip[46], dstip[46];
+        if (PacketIsIPv4(p)) {
+            PrintInet(AF_INET, (const void *)GET_IPV4_SRC_ADDR_PTR(p), srcip, sizeof(srcip));
+            PrintInet(AF_INET, (const void *)GET_IPV4_DST_ADDR_PTR(p), dstip, sizeof(dstip));
+        } else if (PacketIsIPv6(p)) {
+            PrintInet(AF_INET6, (const void *)GET_IPV6_SRC_ADDR(p), srcip, sizeof(srcip));
+            PrintInet(AF_INET6, (const void *)GET_IPV6_DST_ADDR(p), dstip, sizeof(dstip));
+        } else {
+            decoder_event = 1;
+        }
+        if(decoder_event == 0)
+           SCLogInfo("Appending sid %" PRIu32 ", s->num %" PRIu32 " to alert queue, src(%s:%d)->dst(%s:%d) tx_id:%lu",
+                   s->id, s->num,srcip,p->sp,dstip,p->dp,tx_id);
+    }
     det_ctx->alert_queue_size++;
 }
 
@@ -379,7 +394,10 @@ void PacketAlertFinalize(DetectEngineCtx *de_ctx, DetectEngineThreadCtx *det_ctx
     /* sort the alert queue before thresholding and appending to Packet */
     qsort(det_ctx->alert_queue, det_ctx->alert_queue_size, sizeof(PacketAlert),
             AlertQueueSortHelper);
-
+    
+    if (det_ctx->alert_queue_size != 0)
+        SCLogInfo("PacketAlertFinalize alert_queue_size(%u)",det_ctx->alert_queue_size);
+    
     for (uint16_t i = 0; i < det_ctx->alert_queue_size; i++) {
         PacketAlert *pa = &det_ctx->alert_queue[i];
         const Signature *s = de_ctx->sig_array[pa->num];
@@ -413,8 +431,13 @@ void PacketAlertFinalize(DetectEngineCtx *de_ctx, DetectEngineThreadCtx *det_ctx
 
         /* Thresholding removes this alert */
         if (res == 0 || res == 2 || (s->action & (ACTION_ALERT | ACTION_PASS)) == 0) {
-            SCLogDebug("sid:%u: skipping alert because of thresholding (res=%d) or NOALERT (%02x)",
-                    s->id, res, s->action);
+            if(p->flow != NULL) {
+                SCLogInfo("has flow alert_uuid(%u) sid:%u: skipping alert because of thresholding (res=%d) or NOALERT (%02x)",
+                     p->flow->flow_alert_uuid, s->id, res, s->action);
+            } else {
+                SCLogInfo("no flow alert_uuid(%u) sid:%u: skipping alert because of thresholding (res=%d) or NOALERT (%02x)",
+                     p->alerts.alerts->alert_uuid, s->id, res, s->action);
+            }
             /* we will not copy this to the AlertQueue */
             p->alerts.suppressed++;
         } else if (p->alerts.cnt < packet_alert_max) {
@@ -426,8 +449,32 @@ void PacketAlertFinalize(DetectEngineCtx *de_ctx, DetectEngineThreadCtx *det_ctx
                 SCLogDebug("sid:%u: is a pass rule, so break out of loop", s->id);
                 break;
             }
+            //å¦‚æžœè¿™ä¸ªæµæ²¡æœ‰uuid,åˆ™ç”Ÿæˆä¸€ä¸ª,å¹¶ä¸”å­˜åˆ°pakcet
+            if(p->flow != NULL) {
+                if(p->flow->flow_alert_uuid == 0) {
+                    SC_ATOMIC_ADD(g_alert_uuid_id, 1);
+                    uint32_t x = SC_ATOMIC_GET(g_alert_uuid_id);
+                    p->flow->flow_alert_uuid = x;
+                    p->alerts.alerts[p->alerts.cnt].alert_uuid = x;
+                    {
+                        int decoder_event = 1;
+                        char srcip[46], dstip[46];
+                        if (PacketIsIPv4(p)) {
+                            PrintInet(AF_INET, (const void *)GET_IPV4_SRC_ADDR_PTR(p), srcip, sizeof(srcip));
+                            PrintInet(AF_INET, (const void *)GET_IPV4_DST_ADDR_PTR(p), dstip, sizeof(dstip));
+                            decoder_event = 0;
+                        }
+                        if (likely(decoder_event == 0)) {
+                            SCLogInfo("PacketAlertFinalize genuuid(%lu) src(%s:%d) dst(%s:%d) sid(%d) msg(%s)",
+                                x, srcip, p->sp, dstip,p->dp, p->alerts.alerts[p->alerts.cnt].s->id, p->alerts.alerts->s->msg);
+                        } else {
+                            SCLogInfo("PacketAlertFinalize genuuid(%lu) sp(%d) dp(%d) sid(%d) msg(%s)",
+                                x, p->sp,p->dp, p->alerts.alerts[p->alerts.cnt].s->id, p->alerts.alerts->s->msg);
+                        }
+                    }
+                }
+            }
             p->alerts.cnt++;
-
             /* pass with alert, we're done. Alert is logged. */
             if (pa->action & ACTION_PASS) {
                 SCLogDebug("sid:%u: is a pass rule, so break out of loop", s->id);
@@ -447,10 +494,8 @@ void PacketAlertFinalize(DetectEngineCtx *de_ctx, DetectEngineThreadCtx *det_ctx
     int decoder_event = 0;
     if (p->flow != NULL && p->alerts.cnt > 0) {
         if (!FlowHasAlerts(p->flow)) {
-            FlowSetHasAlertsFlag(p->flow);
-            p->alerts_uuid = g_alert_uuid++;  //ºóÃæÔÙ¼ÓËø
+            FlowSetHasAlertsFlag(p->flow);            
             p->flags |= PKT_FIRST_ALERTS;
-            //¼Ó¸ö´òÓ¡¿´¿´
             {
                 char srcip[46], dstip[46];
                 if (PacketIsIPv4(p)) {
@@ -462,9 +507,14 @@ void PacketAlertFinalize(DetectEngineCtx *de_ctx, DetectEngineThreadCtx *det_ctx
                 } else {
                     decoder_event = 1;
                 }
+                uint16_t last_cnt = p->alerts.cnt-1;
+                uint32_t alerts_uuid = p->alerts.alerts[last_cnt].alert_uuid;
                 if (likely(decoder_event == 0)) {
-                    SCLogInfo("PacketAlertFinalize first alert_uuid(%lu) src(%s:%d) dst(%s:%d) sid(%d) msg(%s)",
-                        p->alerts_uuid, srcip, p->sp, dstip,p->dp, p->alerts.alerts->s->id, p->alerts.alerts->s->msg);
+                    SCLogInfo("PacketAlertFinalize first alert_cnt(%d) alert_uuid(%lu) src(%s:%d) dst(%s:%d) sid(%d) msg(%s)",
+                        last_cnt,alerts_uuid, srcip, p->sp, dstip,p->dp, p->alerts.alerts[last_cnt].s->id, p->alerts.alerts->s->msg);
+                } else {
+                    SCLogInfo("PacketAlertFinalize first alert_cnt(%d) alert_uuid(%lu) sp(%d) dp(%d) sid(%d) msg(%s)",
+                        last_cnt,alerts_uuid, p->sp,p->dp, p->alerts.alerts[last_cnt].s->id, p->alerts.alerts->s->msg);
                 }
             }
         }

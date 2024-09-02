@@ -503,6 +503,8 @@ typedef struct Flow_
     uint64_t todstbytecnt;
     uint64_t tosrcbytecnt;
 
+    uint32_t flow_alert_uuid;
+
     Storage storage[];
 } Flow;
 

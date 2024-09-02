@@ -243,6 +243,7 @@ typedef uint16_t Port;
 /* structure to store the sids/gids/etc the detection engine
  * found in this packet */
 typedef struct PacketAlert_ {
+    uint32_t alert_uuid;
     SigIntId num; /* Internal num, used for sorting */
     uint8_t action; /* Internal num, used for thresholding */
     uint8_t flags;
@@ -593,7 +594,6 @@ typedef struct Packet_
     struct LiveDevice_ *livedev;
 
     PacketAlerts alerts;
-    uint64_t alerts_uuid;
 
     struct Host_ *host_src;
     struct Host_ *host_dst;

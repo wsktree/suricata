@@ -252,6 +252,7 @@ static TmEcode AlertDebugLogger(ThreadVars *tv, const Packet *p, void *thread_da
         }
 
         MemBufferWriteString(aft->buffer,
+                             "ALERT UUID [%02d]:     %d\n"
                              "ALERT MSG [%02d]:      %s\n"
                              "ALERT GID [%02d]:      %" PRIu32 "\n"
                              "ALERT SID [%02d]:      %" PRIu32 "\n"
@@ -259,6 +260,7 @@ static TmEcode AlertDebugLogger(ThreadVars *tv, const Packet *p, void *thread_da
                              "ALERT CLASS [%02d]:    %s\n"
                              "ALERT PRIO [%02d]:     %" PRIu32 "\n"
                              "ALERT FOUND IN [%02d]: %s\n",
+                             i, pa->alert_uuid,
                              i, pa->s->msg,
                              i, pa->s->gid,
                              i, pa->s->id,

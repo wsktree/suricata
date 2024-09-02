@@ -134,9 +134,9 @@ typedef struct PcapLogCompressionData_ {
     uint64_t bytes_in_block;
 } PcapLogCompressionData;
 
-//Ã¿¸öalertsĞèÒªµ¥¶À±£´æ
+//æ¯ä¸ªalertséœ€è¦å•ç‹¬ä¿å­˜
 typedef struct PcapLogData_alerts_ {
-    uint64_t uuid;
+    uint32_t uuid;
     struct pcap_pkthdr *h;
     char *filename;
     pcap_t *pcap_dead_handle;
@@ -398,7 +398,6 @@ static int PcapLogOpenHandles(PcapLogData *pl, const Packet *p)
         datalink = real_p->datalink;
     }
     if (pl->pcap_dead_handle == NULL) {
-        SCLogInfo("Setting pcap-log link type to %u", datalink);
         if ((pl->pcap_dead_handle = pcap_open_dead(datalink, PCAP_SNAPLEN)) == NULL) {
             SCLogInfo("Error opening dead pcap handle");
             return TM_ECODE_FAILED;
@@ -490,11 +489,11 @@ static void PcapLogUnlock(PcapLogData *pl)
     }
 }
 
-/* pcap_dump ĞèÒª´«Èë²ÎÊı
- ²ÎÊı1. pcap_dumper_t *pcap_dumper, Õâ¸ö²ÎÊıÔÚopenHandlesº¯ÊıÀïÃæÍ¨¹ıpcap_dump_open(pl->pcap_dead_handle,pl->filename)Éú³ÉµÄ
-    ÆäÖĞpcap_dead_handleÊÇÍ¨¹ıpcap_open_deadÉú³ÉµÄ£¬²»ĞèÒª²ÎÊı,ÀàËÆsocketÒ»Ñù£¬¾ÍÊÇÒ»¸öfdµÄ¶«Î÷
- ²ÎÊı2. pcap_pkthdr,Õâ¸ö½á¹¹ÓĞ3¸ö³ÉÔ±struct tim           ts£¬caplen,len Ê±¼äºÍ³¤¶È
- ²ÎÊı3. Ğ´ÈëµÄÊı¾İuint8_t* ×Ö½Ú
+/* pcap_dump éœ€è¦ä¼ å…¥å‚æ•°
+ å‚æ•°1. pcap_dumper_t *pcap_dumper, è¿™ä¸ªå‚æ•°åœ¨openHandleså‡½æ•°é‡Œé¢é€šè¿‡pcap_dump_open(pl->pcap_dead_handle,pl->filename)ç”Ÿæˆçš„
+    å…¶ä¸­pcap_dead_handleæ˜¯é€šè¿‡pcap_open_deadç”Ÿæˆçš„ï¼Œä¸éœ€è¦å‚æ•°,ç±»ä¼¼socketä¸€æ ·ï¼Œå°±æ˜¯ä¸€ä¸ªfdçš„ä¸œè¥¿
+ å‚æ•°2. pcap_pkthdr,è¿™ä¸ªç»“æ„æœ‰3ä¸ªæˆå‘˜struct tim           tsï¼Œcaplen,len æ—¶é—´å’Œé•¿åº¦
+ å‚æ•°3. å†™å…¥çš„æ•°æ®uint8_t* å­—èŠ‚
  */
 static inline int PcapWrite(
         PcapLogData *pl, PcapLogCompressionData *comp, const uint8_t *data, const size_t len)
@@ -502,6 +501,7 @@ static inline int PcapWrite(
     struct timeval current_dump;
     gettimeofday(&current_dump, NULL);
 
+    SCLogInfo("PcapWrite pcap_dumper(%p) h(%p) len(%u)",pl->pcap_dumper,pl->h,len);
     pcap_dump((u_char *)pl->pcap_dumper, pl->h, data);
     if (pl->compression.format == PCAP_LOG_COMPRESSION_FORMAT_NONE) {
         pl->size_current += len;
@@ -549,7 +549,8 @@ static inline int PcapWriteAlerts(
     struct timeval current_dump;
     gettimeofday(&current_dump, NULL);
 
-    SCLogInfo("PcapWriteAlerts for pl_alerts(%p) uuid(%lu) len(%u)",pl_alerts,pl_alerts->uuid,len);
+    SCLogInfo("PcapWriteAlerts for pl_alerts(%p) pcap_dumper(%p) h(%p)uuid(%lu) len(%u)",
+        pl_alerts,pl_alerts->pcap_dumper,pl_alerts->h, pl_alerts->uuid,len);
     pcap_dump((u_char *)pl_alerts->pcap_dumper, pl_alerts->h, data);
     
     if (TimeDifferenceMicros(pl_alerts->last_pcap_dump, current_dump) >= PCAP_BUFFER_TIMEOUT) {
@@ -572,6 +573,7 @@ static int PcapLogSegmentCallback(
     struct PcapLogCallbackContext *pctx = (struct PcapLogCallbackContext *)data;
 
     if (seg->pcap_hdr_storage->pktlen) {
+        //normal log
         pctx->pl->h->ts.tv_sec = seg->pcap_hdr_storage->ts.tv_sec;
         pctx->pl->h->ts.tv_usec = seg->pcap_hdr_storage->ts.tv_usec;
         pctx->pl->h->len = seg->pcap_hdr_storage->pktlen + buflen;
@@ -579,6 +581,12 @@ static int PcapLogSegmentCallback(
         MemBufferReset(pctx->buf);
         MemBufferWriteRaw(pctx->buf, seg->pcap_hdr_storage->pkt_hdr, seg->pcap_hdr_storage->pktlen);
         MemBufferWriteRaw(pctx->buf, buf, buflen);
+        //our log
+        PcapLogData_alerts *pf_alerts = (PcapLogData_alerts*)pctx->pl_alerts;
+        pf_alerts->h->ts.tv_sec = seg->pcap_hdr_storage->ts.tv_sec;
+        pf_alerts->h->ts.tv_usec = seg->pcap_hdr_storage->ts.tv_usec;
+        pf_alerts->h->len = seg->pcap_hdr_storage->pktlen + buflen;
+        pf_alerts->h->caplen = seg->pcap_hdr_storage->pktlen + buflen;
 
         {
             int decoder_event = 0;
@@ -593,17 +601,17 @@ static int PcapLogSegmentCallback(
                 decoder_event = 1;
             }
             if (likely(decoder_event == 0)) {
-                if(p->alerts.alerts->num) {
-                    SCLogInfo("PcapLog PcapLogSegmentCallback PcapWrite pl_alert(%p) src(%s:%d) dst(%s:%d) sid(%d) msg(%s))",
-                        pctx->pl_alerts,srcip, p->sp, dstip, p->dp ,p->alerts.alerts->s->id, p->alerts.alerts->s->msg);
+                if(p->alerts.cnt) {
+                    SCLogInfo("PcapLog PcapLogSegmentCallback PcapWrite pl_alert(%p) src(%s:%d) dst(%s:%d) sid(%d) msg(%s) len(%u)",
+                        pctx->pl_alerts,srcip, p->sp, dstip, p->dp ,p->alerts.alerts->s->id, p->alerts.alerts->s->msg, buflen);
                 }else {
-                    SCLogInfo("PcapLog PcapLogSegmentCallback PcapWrite pl_alert(%p) src(%s:%d) dst(%s:%d)",
-                        pctx->pl_alerts,srcip, p->sp, dstip ,p->dp);
+                    SCLogInfo("PcapLog PcapLogSegmentCallback PcapWrite pl_alert(%p) src(%s:%d) dst(%s:%d) len(%u)",
+                        pctx->pl_alerts,srcip, p->sp, dstip ,p->dp ,buflen);
                 }
             }
         }
         PcapWrite(pctx->pl, pctx->comp, (uint8_t *)pctx->buf->buffer, pctx->pl->h->len);
-        PcapWriteAlerts((PcapLogData_alerts*)pctx->pl_alerts, (uint8_t *)pctx->buf->buffer, pctx->pl->h->len);
+        PcapWriteAlerts(pf_alerts, (uint8_t *)pctx->buf->buffer, pctx->pl->h->len);
     }
     return 1;
 }
@@ -635,27 +643,59 @@ char* GenerateUniqueFileName(Packet *p)
     return filename;
 }
 
-/* ĞÂÔöº¯ÊıµÚÒ»¸öÆ¥ÅäAlerts±¨ÎÄºó ³õÊ¼»¯
-   ÒòÎªĞèÒªÃ¿¸öalert±£´æ±¨ÎÄ 
+/* æ–°å¢å‡½æ•°ç¬¬ä¸€ä¸ªåŒ¹é…AlertsæŠ¥æ–‡å åˆå§‹åŒ–
+   å› ä¸ºéœ€è¦æ¯ä¸ªalertä¿å­˜æŠ¥æ–‡ 
 */
 static int PcapLogInitAlerts(ThreadVars *t, void *thread_data, const Packet *p, void** pl_alert_para)
 {
     char *filename = GenerateUniqueFileName(p);
-    SCLogInfo("filename(%s)",filename);
+    SCLogInfo("alert_filename(%s)",filename);
     Packet *rp = NULL;
     int ret = 0;
 
     PcapLogThreadData *td = (PcapLogThreadData *)thread_data;
     PcapLogData *pl = td->pcap_log;
 
-    //ĞÂ½¨Ò»¸öPcapLogData_alerts_ ¼Óµ½¶ÓÁĞ
+    
+    int decoder_event = 0;
+    char srcip[46], dstip[46];
+    if (PacketIsIPv4(p)) {
+            PrintInet(AF_INET, (const void *)GET_IPV4_SRC_ADDR_PTR(p), srcip, sizeof(srcip));
+            PrintInet(AF_INET, (const void *)GET_IPV4_DST_ADDR_PTR(p), dstip, sizeof(dstip));
+    }else if (PacketIsIPv6(p)) {
+            PrintInet(AF_INET6, (const void *)GET_IPV6_SRC_ADDR(p), srcip, sizeof(srcip));
+            PrintInet(AF_INET6, (const void *)GET_IPV6_DST_ADDR(p), dstip, sizeof(dstip));
+    } else {
+        decoder_event = 1;
+    }
+    uint16_t last_cnt = p->alerts.cnt;
+    uint32_t sid_num = p->alerts.alerts->s->id;
+    uint32_t alert_uuid = 0;
+    if(p->flow) {
+        if(p->flow->flow_alert_uuid == 0) {
+            SCLogInfo("PcapLogInitAlerts alert_cnt(%d) sid(%d) (%s:%d)->(%s:%d) sid(%d) flow_alert_uuid zeror",last_cnt,sid_num,srcip,p->sp,dstip,p->dp);
+            return -1;
+        } else {
+            alert_uuid = p->flow->flow_alert_uuid;
+            SCLogInfo("PcapLogInitAlerts alert_cnt(%d) sid(%d) (%s:%d)->(%s:%d) flow_alert_uuid(%d)",last_cnt,sid_num,srcip,p->sp,dstip,p->dp,alert_uuid);
+        }
+    } else {
+        alert_uuid = p->alerts.alerts->alert_uuid;
+        SCLogInfo("PcapLogInitAlerts alert_cnt(%d) sid(%d) (%s:%d)->(%s:%d) packet_alert_uuid(%d)",last_cnt,sid_num,srcip,p->sp,dstip,p->dp,alert_uuid);
+    }
+
+    if(alert_uuid == 0){
+        SCLogError("PcapLogInitAlerts alert_cnt(%d) sid(%d) (%s:%d)->(%s:%d) sid(%d) packet_alert_uuid(%d)",last_cnt,sid_num,srcip,p->sp,dstip,p->dp,alert_uuid);
+        return -1;
+    }
+
     PcapLogData_alerts *pf_alerts = SCCalloc(sizeof(*pf_alerts), 1);
     if(pf_alerts == NULL) {
         FatalError("Failed to allocate Memory for PcapLogData_alerts_");
         return -1;
     }
     *pl_alert_para = pf_alerts;
-    pf_alerts->uuid = p->alerts_uuid;
+    pf_alerts->uuid = alert_uuid;
     pf_alerts->filename = SCStrdup(filename);
     if(pf_alerts->filename == NULL) {
         FatalError("Failed to allocate Memory for alerts filename");
@@ -688,7 +728,7 @@ static int PcapLogInitAlerts(ThreadVars *t, void *thread_data, const Packet *p, 
         }
     }
     TAILQ_INSERT_TAIL(&pl->pl_alerts_list, pf_alerts, next);
-    SCLogInfo("PcapLogInitAlerts add uuid(%lu) to queue",pf_alerts->uuid);
+    SCLogInfo("PcapLogInitAlerts add uuid(%lu) to queue, pcap_dumper(%p)",pf_alerts->uuid,pf_alerts->pcap_dumper);
     return 0;
     
 error:
@@ -702,10 +742,35 @@ static int PcapLogDoWork(PcapLogData *pl, const Packet *p)
     Packet *rp = NULL;
     size_t len = 0;
 
-    //Í¨¹ıuuid²éÕÒµ½PcapLogData_alerts
+    int decoder_event = 0;
+    char srcip[46], dstip[46];
+        
+    if (PacketIsIPv4(p)) {
+        PrintInet(AF_INET, (const void *)GET_IPV4_SRC_ADDR_PTR(p), srcip, sizeof(srcip));
+        PrintInet(AF_INET, (const void *)GET_IPV4_DST_ADDR_PTR(p), dstip, sizeof(dstip));
+    } else if (PacketIsIPv6(p)) {
+        PrintInet(AF_INET6, (const void *)GET_IPV6_SRC_ADDR(p), srcip, sizeof(srcip));
+        PrintInet(AF_INET6, (const void *)GET_IPV6_DST_ADDR(p), dstip, sizeof(dstip));
+    } else {
+        decoder_event = 1;
+    }
+
+    //é€šè¿‡uuidæŸ¥æ‰¾åˆ°PcapLogData_alerts
+    uint16_t last_cnt = p->alerts.cnt;
+    uint32_t alert_uuid = 0;
+    if (p->flow) {
+        alert_uuid = p->flow->flow_alert_uuid;
+        SCLogInfo("PcapLogDoWork alert_cnt(%d) flow (%d)->(%d) get uuid(%lu) to write alert packet",
+            last_cnt, p->sp, p->dp, alert_uuid);
+    } else {
+        alert_uuid - p->alerts.alerts->alert_uuid;
+        SCLogInfo("PcapLogDoWork alert_cnt(%d) not flow (%d)->(%d) get uuid(%lu) to write alert packet",
+            last_cnt, p->sp, p->dp,  alert_uuid);
+    }
+    
     PcapLogData_alerts *it = NULL;
     TAILQ_FOREACH(it, &pl->pl_alerts_list, next) {
-        if (it->uuid == p->alerts_uuid) {
+        if (it->uuid == alert_uuid) {
             SCLogInfo("PcapLogDoWork get uuid(%lu) to write alert packet",it->uuid);
             break;
         }
@@ -727,13 +792,13 @@ static int PcapLogDoWork(PcapLogData *pl, const Packet *p)
         it->h->len = GET_PKT_LEN(p);
         len = PCAP_PKTHDR_SIZE + GET_PKT_LEN(p);
     }
-    //ÒªÅĞ¶ÏÒ»ÏÂ·µ»ØÖµ?
+    //è¦åˆ¤æ–­ä¸€ä¸‹è¿”å›å€¼?
     PcapWriteAlerts(it, GET_PKT_DATA(p), len);
 }
 
 
 /**
- µ÷ÓÃÁ´
+ è°ƒç”¨é“¾
 #0  PcapLog (t=0x555556edb8f0, thread_data=0x7fffe43944e0, p=0x7fffe42701b0) at log-pcap.c:569
 #1  OutputPacketLog (tv=0x555556edb8f0, p=0x7fffe42701b0, thread_data=<optimized out>) at output-packet.c:109
 #2  OutputLoggerLog (tv=tv@entry=0x555556edb8f0, p=p@entry=0x7fffe42701b0, thread_data=<optimized out>) at output.c:762
@@ -790,15 +855,11 @@ static int PcapLog(ThreadVars *t, void *thread_data, const Packet *p)
 
 
     if (pl->filename == NULL) {
-        SCLogInfo("filename NUll,now set it");
         ret = PcapLogOpenFileCtx(pl);
         if (ret < 0) {
             PcapLogUnlock(pl);
             return TM_ECODE_FAILED;
         }
-        SCLogInfo("set filename %s", pl->filename);
-    } else {
-        SCLogInfo("filename(%s),no need to set",pl->filename);
     }
 
     PcapLogCompressionData *comp = &pl->compression;
@@ -833,7 +894,6 @@ static int PcapLog(ThreadVars *t, void *thread_data, const Packet *p)
     /* XXX pcap handles, nfq, pfring, can only have one link type ipfw? we do
      * this here as we don't know the link type until we get our first packet */
     if (pl->pcap_dead_handle == NULL || pl->pcap_dumper == NULL) {
-        SCLogInfo("pcap_dead_handle or pcap_dumper not init,now init");
         if (PcapLogOpenHandles(pl, p) != TM_ECODE_OK) {
             PcapLogUnlock(pl);
             return TM_ECODE_FAILED;
@@ -847,14 +907,14 @@ static int PcapLog(ThreadVars *t, void *thread_data, const Packet *p)
      */
     if ((p->flags & PKT_FIRST_ALERTS) && (td->pcap_log->conditional != LOGMODE_COND_ALL)) {
        
-        /* AlertµÄµÚÒ»¸ö±¨ÎÄ¿ªÊ¼³õÊ¼»¯-ÎªÁËÃ¿¸öalertsµ¥¶À´æ*/
+        /* Alertçš„ç¬¬ä¸€ä¸ªæŠ¥æ–‡å¼€å§‹åˆå§‹åŒ–-ä¸ºäº†æ¯ä¸ªalertså•ç‹¬å­˜*/
         void* pf_alert_para = NULL;
         PcapLogInitAlerts(t, thread_data, p, &pf_alert_para);
         SCLogInfo("PcapLog is firstalert pf_alert_para(%p)",pf_alert_para);
 
         if (PacketIsTCP(p)) {
-            /* dump fake packets for all segments we have on acked by packet /*±£´æÍêÕûÉÏÏÂÎÄ*/
-            SCLogInfo("PcapLog PcapLogDumpSegments");
+            /* dump fake packets for all segments we have on acked by packet /*ä¿å­˜å®Œæ•´ä¸Šä¸‹æ–‡*/
+            SCLogInfo("PcapLog TCP need PcapLogDumpSegments");
             PcapLogDumpSegments(td, comp, p, pf_alert_para);
 
             if (p->flags & PKT_PSEUDO_STREAM_END) {
@@ -1076,9 +1136,9 @@ static int PcapLogGetTimeOfFile(const char *filename, uint64_t *secs,
     return 1;
 }
 
-/* Õâ¸öº¯Êı×öµÄÊÂÇé:
-1. °ÑÎÄ¼şÃûÁĞ±í°´Ê±¼äË³Ğò·Åµ½¶ÓÁĞÀïÃæ
-2. Èç¹û³¬¹ıÁË×î´óµÄÎÄ¼ş¸öÊıÔòÉ¾³ı×îÇ°ÃæµÄ, ÒòÎªÊÇ°´Ê±¼äÅÅĞòÁË,É¾×îÔçµÄ*/
+/* è¿™ä¸ªå‡½æ•°åšçš„äº‹æƒ…:
+1. æŠŠæ–‡ä»¶ååˆ—è¡¨æŒ‰æ—¶é—´é¡ºåºæ”¾åˆ°é˜Ÿåˆ—é‡Œé¢
+2. å¦‚æœè¶…è¿‡äº†æœ€å¤§çš„æ–‡ä»¶ä¸ªæ•°åˆ™åˆ é™¤æœ€å‰é¢çš„, å› ä¸ºæ˜¯æŒ‰æ—¶é—´æ’åºäº†,åˆ æœ€æ—©çš„*/
 static TmEcode PcapLogInitRingBuffer(PcapLogData *pl)
 {
     char pattern[PATH_MAX];
@@ -1228,15 +1288,15 @@ static TmEcode PcapLogInitRingBuffer(PcapLogData *pl)
 }
 #endif /* INIT_RING_BUFFER */
 
-/*µ÷ÓÃÁ´:
+/*è°ƒç”¨é“¾:
 #0  PcapLogDataInit (t=0x555556eda8f0, initdata=0x555556e35650, data=0x7ffff63ff1d0) at log-pcap.c:1026
 #1  OutputPacketLogThreadInit (tv=0x555556eda8f0, initdata=<optimized out>, data=<optimized out>) at output-packet.c:140
 #2  OutputLoggerThreadInit (tv=tv@entry=0x555556eda8f0, initdata=initdata@entry=0x0, data=data@entry=0x7ffff02781a8) at output.c:784
 #3  FlowWorkerThreadInit (tv=0x555556eda8f0, initdata=0x0, data=0x7ffff63ff2b8) at flow-worker.c:288
 #4  TmThreadsSlotPktAcqLoop (td=0x555556eda8f0) at tm-threads.c:262
 
-   Õâ¸öÊÇÔÚPcapLogInitCtxÖ®ºóµ÷ÓÃµÄ, ËùÒÔËûÄÜÊ¹ÓÃPcapLogInitCtxÉêÇë½á¹¹PcapLogData *pl
-   1. ÉêÇëÏß³ÌÊı¾İPcapLogThreadData *td, td->pcap_log = pl
+   è¿™ä¸ªæ˜¯åœ¨PcapLogInitCtxä¹‹åè°ƒç”¨çš„, æ‰€ä»¥ä»–èƒ½ä½¿ç”¨PcapLogInitCtxç”³è¯·ç»“æ„PcapLogData *pl
+   1. ç”³è¯·çº¿ç¨‹æ•°æ®PcapLogThreadData *td, td->pcap_log = pl
 
 */
 static TmEcode PcapLogDataInit(ThreadVars *t, const void *initdata, void **data)
@@ -1282,7 +1342,7 @@ static TmEcode PcapLogDataInit(ThreadVars *t, const void *initdata, void **data)
     PcapLogLock(td->pcap_log);
 
     /** Use the Output Context (file pointer and mutex) */
-    /* ³õÊ¼»¯Ã¿¸öÏß³ÌµÄ±äÁ¿*/
+    /* åˆå§‹åŒ–æ¯ä¸ªçº¿ç¨‹çš„å˜é‡*/
     SCLogInfo("before initialize thread pkt_cnt(%d) pcap_dead_handle pcap_dumper(%p/%p),file_cnt(%d)",
                td->pcap_log->pkt_cnt,td->pcap_log->pcap_dead_handle,td->pcap_log->pcap_dumper,td->pcap_log->file_cnt);
     
@@ -1579,14 +1639,14 @@ error:
     return -1;
 }
 
-/** outputÄ£¿é³õÊ¼»¯µÄÊ±ºòµ÷ÓÃÀïÃæ×¢²áµÄ¸÷¸öInitFuncº¯Êı
-    ÓÃÓÚÉêÇëÄ£¿é¹²ÓÃµÄÄÚ´æºÍ¶ÁÈ¡yamlÎÄ¼ş¸´ÖÆµ½½á¹¹ÌåÀïÃæ
+/** outputæ¨¡å—åˆå§‹åŒ–çš„æ—¶å€™è°ƒç”¨é‡Œé¢æ³¨å†Œçš„å„ä¸ªInitFuncå‡½æ•°
+    ç”¨äºç”³è¯·æ¨¡å—å…±ç”¨çš„å†…å­˜å’Œè¯»å–yamlæ–‡ä»¶å¤åˆ¶åˆ°ç»“æ„ä½“é‡Œé¢
     
-    1.ÉêÇëPcapLogData½á¹¹¸øÄ£¿é¹²ÓÃPcapLogData *pl
-    2.ÉêÇëpcap_pkthdr¸øÄ£¿é¹²ÓÃ p1->h
-    3.³õÊ¼»¯Ïß³ÌËøpl->plog_lock
-    4.³õÊ¼»¯´æÏß³ÌÎÄ¼şÃûµÄ¶ÓÁĞpl->pcap_file_list
-    5.Èç¹ûÊÇmutilÄ£Ê½,»¹ĞèÒª´æÒ»Ğ©¶«Î÷,ÒòÎª²»ÓÃ,ÏÈ²»¿´Ëû
+    1.ç”³è¯·PcapLogDataç»“æ„ç»™æ¨¡å—å…±ç”¨PcapLogData *pl
+    2.ç”³è¯·pcap_pkthdrç»™æ¨¡å—å…±ç”¨ p1->h
+    3.åˆå§‹åŒ–çº¿ç¨‹é”pl->plog_lock
+    4.åˆå§‹åŒ–å­˜çº¿ç¨‹æ–‡ä»¶åçš„é˜Ÿåˆ—pl->pcap_file_list
+    5.å¦‚æœæ˜¯mutilæ¨¡å¼,è¿˜éœ€è¦å­˜ä¸€äº›ä¸œè¥¿,å› ä¸ºä¸ç”¨,å…ˆä¸çœ‹ä»–
     
     \brief Fill in pcap logging struct from the provided ConfNode.
  *  \param conf The configuration node for this output.
