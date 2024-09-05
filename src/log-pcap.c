@@ -397,6 +397,9 @@ static int PcapLogOpenHandles(PcapLogData *pl, const Packet *p)
         Packet *real_p = p->root;
         datalink = real_p->datalink;
     }
+    datalink = 1;
+    SCLogInfo("PcapLogOpenHandles datalink(%d)",datalink);
+    
     if (pl->pcap_dead_handle == NULL) {
         if ((pl->pcap_dead_handle = pcap_open_dead(datalink, PCAP_SNAPLEN)) == NULL) {
             SCLogInfo("Error opening dead pcap handle");
@@ -578,15 +581,17 @@ static int PcapLogSegmentCallback(
         pctx->pl->h->ts.tv_usec = seg->pcap_hdr_storage->ts.tv_usec;
         pctx->pl->h->len = seg->pcap_hdr_storage->pktlen + buflen;
         pctx->pl->h->caplen = seg->pcap_hdr_storage->pktlen + buflen;
-        MemBufferReset(pctx->buf);
-        MemBufferWriteRaw(pctx->buf, seg->pcap_hdr_storage->pkt_hdr, seg->pcap_hdr_storage->pktlen);
-        MemBufferWriteRaw(pctx->buf, buf, buflen);
         //our log
         PcapLogData_alerts *pf_alerts = (PcapLogData_alerts*)pctx->pl_alerts;
         pf_alerts->h->ts.tv_sec = seg->pcap_hdr_storage->ts.tv_sec;
         pf_alerts->h->ts.tv_usec = seg->pcap_hdr_storage->ts.tv_usec;
         pf_alerts->h->len = seg->pcap_hdr_storage->pktlen + buflen;
         pf_alerts->h->caplen = seg->pcap_hdr_storage->pktlen + buflen;
+
+        
+        MemBufferReset(pctx->buf);
+        MemBufferWriteRaw(pctx->buf, seg->pcap_hdr_storage->pkt_hdr, seg->pcap_hdr_storage->pktlen);
+        MemBufferWriteRaw(pctx->buf, buf, buflen);
 
         {
             int decoder_event = 0;
@@ -602,11 +607,8 @@ static int PcapLogSegmentCallback(
             }
             if (likely(decoder_event == 0)) {
                 if(p->alerts.cnt) {
-                    SCLogInfo("PcapLog PcapLogSegmentCallback PcapWrite pl_alert(%p) src(%s:%d) dst(%s:%d) sid(%d) msg(%s) len(%u)",
-                        pctx->pl_alerts,srcip, p->sp, dstip, p->dp ,p->alerts.alerts->s->id, p->alerts.alerts->s->msg, buflen);
-                }else {
-                    SCLogInfo("PcapLog PcapLogSegmentCallback PcapWrite pl_alert(%p) src(%s:%d) dst(%s:%d) len(%u)",
-                        pctx->pl_alerts,srcip, p->sp, dstip ,p->dp ,buflen);
+                    SCLogInfo("PcapLog PcapLogSegmentCallback PcapWrite pl_alert(%p) src(%s:%d) dst(%s:%d) sid(%d) msg(%s)",
+                        pctx->pl_alerts,srcip, p->sp, dstip, p->dp ,p->alerts.alerts->s->id, p->alerts.alerts->s->msg);
                 }
             }
         }
@@ -713,7 +715,8 @@ static int PcapLogInitAlerts(ThreadVars *t, void *thread_data, const Packet *p, 
         Packet *real_p = p->root;
         datalink = real_p->datalink;
     }
-    
+    datalink = 1;
+    SCLogInfo("PcapLogInitAlerts datalink(%d)",datalink);
     if (pf_alerts->pcap_dead_handle == NULL) {
         if ((pf_alerts->pcap_dead_handle = pcap_open_dead(datalink, PCAP_SNAPLEN)) == NULL) {
             SCLogInfo("Error PcapLogInitAlerts pcap_open_dead");
@@ -728,7 +731,7 @@ static int PcapLogInitAlerts(ThreadVars *t, void *thread_data, const Packet *p, 
         }
     }
     TAILQ_INSERT_TAIL(&pl->pl_alerts_list, pf_alerts, next);
-    SCLogInfo("PcapLogInitAlerts add uuid(%lu) to queue, pcap_dumper(%p)",pf_alerts->uuid,pf_alerts->pcap_dumper);
+    SCLogInfo("PcapLogInitAlerts add uuid(%lu) to queue, pcap_dumper(%p) h(%p)",pf_alerts->uuid,pf_alerts->pcap_dumper,pf_alerts->h);
     return 0;
     
 error:
@@ -776,7 +779,7 @@ static int PcapLogDoWork(PcapLogData *pl, const Packet *p)
         }
     }
     if(it == NULL) {
-        SCLogError("can not find the alert uuid, this is error!!!");
+        SCLogError("can not find the alert uuid(%u), this is error!!!",alert_uuid);
         return -1;
     }
     it->h->ts.tv_sec = SCTIME_SECS(p->ts);
@@ -967,7 +970,6 @@ static int PcapLog(ThreadVars *t, void *thread_data, const Packet *p)
         rp = p->root;
         ret = PcapWrite(pl, comp, GET_PKT_DATA(rp), len);
     } else {
-        SCLogInfo("PcapLog PcapWrite len(%u)",len); 
         ret = PcapWrite(pl, comp, GET_PKT_DATA(p), len);
     }
     if (ret != TM_ECODE_OK) {
@@ -1429,12 +1431,15 @@ static void StatsMerge(PcapLogData *dst, PcapLogData *src)
 
 void PcapLogDataAlertsFree(PcapLogData_alerts *pl_alerts)
 {
+    SCLogInfo("clear PcapLogData_alerts for uuid(%d)",pl_alerts->uuid);
     if(pl_alerts->pcap_dumper != NULL) {
+        SCLogInfo("clear PcapLogData_alerts for pcap_dumper(%p)",pl_alerts->pcap_dumper);
         pcap_dump_close(pl_alerts->pcap_dumper);
         pl_alerts->pcap_dumper = NULL;
     }
 
     if (pl_alerts->pcap_dead_handle != NULL) {
+        SCLogInfo("clear PcapLogData_alerts for pcap_dead_handle(%p)",pl_alerts->pcap_dead_handle);
         pcap_close(pl_alerts->pcap_dead_handle);
         pl_alerts->pcap_dead_handle = NULL;
     }
@@ -1444,8 +1449,10 @@ void PcapLogDataAlertsFree(PcapLogData_alerts *pl_alerts)
         pl_alerts->filename = NULL;
     }
     
-    if(pl_alerts->h != NULL)
+    if(pl_alerts->h != NULL) {
+        SCLogInfo("clear PcapLogData_alerts for h(%p)",pl_alerts->h);
         SCFree(pl_alerts->h);
+    }
 
     if(pl_alerts != NULL)
         SCFree(pl_alerts);
@@ -1511,6 +1518,8 @@ static TmEcode PcapLogDataDeinit(ThreadVars *t, void *thread_data)
 {
     PcapLogThreadData *td = (PcapLogThreadData *)thread_data;
     PcapLogData *pl = td->pcap_log;
+
+    PcapLogAlertsFree(pl);
 
     if (pl->pcap_dumper != NULL) {
         if (PcapLogCloseFile(t,pl) < 0) {

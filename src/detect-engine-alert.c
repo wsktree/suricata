@@ -427,6 +427,29 @@ void PacketAlertFinalize(DetectEngineCtx *de_ctx, DetectEngineThreadCtx *det_ctx
 
             /* set actions on packet */
             PacketApplySignatureActions(p, s, pa);
+            
+            //如果这个流没有alert_uuid,则生成一个,并且存到pakcet, 放这里是因为创建写pcap的handle要靠前
+            //不然会丢掉一些报文,但是放这里，需要把后面的flow也需要赋值对应的alert_uuid
+            int decoder_event = 1;
+            char srcip[46], dstip[46];
+            if (PacketIsIPv4(p)) {
+                PrintInet(AF_INET, (const void *)GET_IPV4_SRC_ADDR_PTR(p), srcip, sizeof(srcip));
+                PrintInet(AF_INET, (const void *)GET_IPV4_DST_ADDR_PTR(p), dstip, sizeof(dstip));
+                decoder_event = 0;
+            }
+            if(p->flow != NULL && p->flow->flow_alert_uuid == 0) {
+                //是重新赋值,还是这个流和之前的流是同一个alert, 需要用相同的alert_uuid?
+                SC_ATOMIC_ADD(g_alert_uuid_id, 1);
+                uint32_t x = SC_ATOMIC_GET(g_alert_uuid_id);
+                p->flow->flow_alert_uuid = x;
+                p->alerts.alerts->alert_uuid = x;
+            
+                if (likely(decoder_event == 0)) {
+                    SCLogInfo("PacketAlertFinalize genuuid(%lu) src(%s:%d) dst(%s:%d)",x, srcip, p->sp, dstip,p->dp);
+                } else
+                    SCLogInfo("PacketAlertFinalize genuuid(%lu) sp(%d) dp(%d)",x, p->sp,p->dp);                
+            } else 
+                SCLogInfo("PacketAlertFinalize src(%s:%d) dst(%s:%d) not flow or uuid(%lu)",x, srcip, p->sp, dstip,p->dp,p->flow->flow_alert_uuid);
         }
 
         /* Thresholding removes this alert */
@@ -449,6 +472,7 @@ void PacketAlertFinalize(DetectEngineCtx *de_ctx, DetectEngineThreadCtx *det_ctx
                 SCLogDebug("sid:%u: is a pass rule, so break out of loop", s->id);
                 break;
             }
+            #if 0
             //如果这个流没有uuid,则生成一个,并且存到pakcet
             if(p->flow != NULL) {
                 if(p->flow->flow_alert_uuid == 0) {
@@ -474,6 +498,7 @@ void PacketAlertFinalize(DetectEngineCtx *de_ctx, DetectEngineThreadCtx *det_ctx
                     }
                 }
             }
+            #endif
             p->alerts.cnt++;
             /* pass with alert, we're done. Alert is logged. */
             if (pa->action & ACTION_PASS) {
